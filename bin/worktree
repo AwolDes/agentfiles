@@ -1,0 +1,297 @@
+#!/usr/bin/env bash
+#
+# Git Worktree Manager
+# Manage git worktrees with consistent naming conventions
+#
+# Usage:
+#   bin/worktree list              - List all worktrees with ports
+#   bin/worktree create <branch>   - Create worktree for branch
+#   bin/worktree delete <branch>   - Delete worktree for branch
+#   bin/worktree go <branch>       - Print path to worktree (for cd)
+#   bin/worktree server [branch]   - Start Rails server on auto-assigned port
+#   bin/worktree port [branch]     - Show port for a worktree
+
+set -e
+
+REPO_ROOT=$(git rev-parse --show-toplevel)
+REPO_NAME=$(basename "$REPO_ROOT")
+WORKTREES_BASE="$(dirname "$REPO_ROOT")/worktrees"
+
+# Port range for worktrees (3001-3099, avoiding 3000 for main repo)
+PORT_MIN=3001
+PORT_MAX=3099
+
+# Ensure worktrees directory exists
+mkdir -p "$WORKTREES_BASE"
+
+# Convert branch name to directory name (feature/foo -> feature-foo)
+branch_to_dir() {
+  echo "$1" | tr '/' '-'
+}
+
+# Get worktree path for a branch
+worktree_path() {
+  local branch="$1"
+  local dir_name=$(branch_to_dir "$branch")
+  echo "${WORKTREES_BASE}/${dir_name}"
+}
+
+# Calculate a unique port for a worktree based on its name
+# Uses a simple hash to get a consistent port in the range 3001-3099
+worktree_port() {
+  local name="$1"
+  # Use cksum to hash the name, then mod to get port in range
+  local hash=$(echo "$name" | cksum | awk '{print $1}')
+  local range=$((PORT_MAX - PORT_MIN + 1))
+  local port=$((PORT_MIN + (hash % range)))
+  echo "$port"
+}
+
+# Get the current worktree's branch name (if in a worktree)
+current_worktree_branch() {
+  local current_dir=$(pwd)
+  if [[ "$current_dir" == "$WORKTREES_BASE"/* ]]; then
+    # Extract directory name from path
+    local dir_name=$(basename "$current_dir")
+    echo "$dir_name"
+  fi
+}
+
+cmd_list() {
+  echo "Git Worktrees:"
+  echo ""
+
+  # Parse git worktree list and add port info
+  git worktree list | while read -r line; do
+    local path=$(echo "$line" | awk '{print $1}')
+    local dir_name=$(basename "$path")
+
+    # Check if this is a worktree (not the main repo)
+    if [[ "$path" == "$WORKTREES_BASE"/* ]]; then
+      local port=$(worktree_port "$dir_name")
+      echo "$line  [port: $port]"
+    else
+      echo "$line  [port: 3000]"
+    fi
+  done
+}
+
+cmd_create() {
+  local branch="$1"
+
+  if [ -z "$branch" ]; then
+    echo "Error: Branch name required"
+    echo "Usage: bin/worktree create <branch>"
+    exit 1
+  fi
+
+  local path=$(worktree_path "$branch")
+  local dir_name=$(branch_to_dir "$branch")
+  local port=$(worktree_port "$dir_name")
+
+  # Check if branch exists
+  if git show-ref --verify --quiet "refs/heads/$branch" 2>/dev/null; then
+    echo "Creating worktree for existing branch: $branch"
+    git worktree add "$path" "$branch"
+  else
+    echo "Creating worktree with new branch: $branch"
+    git worktree add -b "$branch" "$path"
+  fi
+
+  # Copy database from main repo if it exists
+  if [ -f "$REPO_ROOT/storage/development.sqlite3" ]; then
+    echo ""
+    echo "Copying database from main repo..."
+    mkdir -p "$path/storage"
+    cp "$REPO_ROOT/storage/development.sqlite3" "$path/storage/"
+    echo "Database copied successfully"
+  fi
+
+  echo ""
+  echo "Worktree created at: $path"
+  echo "Server port: $port"
+  echo ""
+  echo "To use it:"
+  echo "  cd $path"
+  echo "  bin/worktree server   # starts on port $port"
+}
+
+cmd_delete() {
+  local branch="$1"
+  local force=""
+
+  # Check for --force flag
+  if [ "$branch" = "--force" ] || [ "$branch" = "-f" ]; then
+    force="--force"
+    branch="$2"
+  elif [ "$2" = "--force" ] || [ "$2" = "-f" ]; then
+    force="--force"
+  fi
+
+  if [ -z "$branch" ]; then
+    echo "Error: Branch name required"
+    echo "Usage: bin/worktree delete [-f|--force] <branch>"
+    exit 1
+  fi
+
+  local path=$(worktree_path "$branch")
+
+  if [ ! -d "$path" ]; then
+    echo "Error: Worktree not found at $path"
+    exit 1
+  fi
+
+  echo "Removing worktree at: $path"
+  if git worktree remove $force "$path"; then
+    echo "Worktree removed successfully"
+  else
+    echo ""
+    echo "Worktree has uncommitted changes. Use --force to delete anyway:"
+    echo "  bin/worktree delete --force $branch"
+    exit 1
+  fi
+}
+
+cmd_go() {
+  local branch="$1"
+
+  if [ -z "$branch" ]; then
+    echo "Error: Branch name required"
+    echo "Usage: cd \$(bin/worktree go <branch>)"
+    exit 1
+  fi
+
+  local path=$(worktree_path "$branch")
+
+  if [ ! -d "$path" ]; then
+    echo "Error: Worktree not found at $path" >&2
+    exit 1
+  fi
+
+  echo "$path"
+}
+
+cmd_server() {
+  local branch="$1"
+  local dir_name=""
+  local path=""
+  local port=""
+
+  if [ -n "$branch" ]; then
+    # Branch specified - use that worktree
+    dir_name=$(branch_to_dir "$branch")
+    path=$(worktree_path "$branch")
+
+    if [ ! -d "$path" ]; then
+      echo "Error: Worktree not found at $path" >&2
+      exit 1
+    fi
+  else
+    # No branch specified - detect current directory
+    dir_name=$(current_worktree_branch)
+
+    if [ -z "$dir_name" ]; then
+      echo "Error: Not in a worktree directory. Specify a branch or cd to a worktree."
+      echo "Usage: bin/worktree server [branch]"
+      exit 1
+    fi
+
+    path=$(pwd)
+  fi
+
+  port=$(worktree_port "$dir_name")
+
+  echo "Starting dev server for worktree: $dir_name"
+  echo "Port: $port"
+  echo "URL: http://localhost:$port"
+  echo ""
+
+  cd "$path" && PORT="$port" bin/dev
+}
+
+cmd_port() {
+  local branch="$1"
+  local dir_name=""
+
+  if [ -n "$branch" ]; then
+    dir_name=$(branch_to_dir "$branch")
+  else
+    dir_name=$(current_worktree_branch)
+
+    if [ -z "$dir_name" ]; then
+      echo "Error: Not in a worktree directory. Specify a branch or cd to a worktree."
+      echo "Usage: bin/worktree port [branch]"
+      exit 1
+    fi
+  fi
+
+  worktree_port "$dir_name"
+}
+
+cmd_help() {
+  cat <<EOF
+Git Worktree Manager
+
+USAGE:
+  bin/worktree <command> [arguments]
+
+COMMANDS:
+  list                      List all worktrees with their assigned ports
+  create <branch>           Create worktree for branch (creates branch if needed)
+  delete [-f] <branch>      Delete worktree for branch (-f forces deletion)
+  go <branch>               Print worktree path (use: cd \$(bin/worktree go <branch>))
+  server [branch]           Start Rails server on auto-assigned port
+  port [branch]             Show the assigned port for a worktree
+
+NAMING CONVENTION:
+  Worktrees are created in a 'worktrees' directory alongside the main repo.
+  Branch slashes become dashes in directory names.
+
+  Examples:
+    main              -> worktrees/main
+    feature/auth      -> worktrees/feature-auth
+    bugfix/login-fix  -> worktrees/bugfix-login-fix
+
+PORT ASSIGNMENT:
+  Main repo uses port 3000. Each worktree gets a unique port (3001-3099)
+  based on its name, so the port is consistent across sessions.
+
+EXAMPLES:
+  bin/worktree list
+  bin/worktree create feature/new-feature
+  bin/worktree delete feature/old-feature
+  cd \$(bin/worktree go feature/new-feature)
+  bin/worktree server                        # Start server in current worktree
+  bin/worktree server feature/new-feature    # Start server for specific worktree
+EOF
+}
+
+case "${1:-help}" in
+  list)
+    cmd_list
+    ;;
+  create)
+    cmd_create "$2"
+    ;;
+  delete)
+    cmd_delete "$2" "$3"
+    ;;
+  go)
+    cmd_go "$2"
+    ;;
+  server|s)
+    cmd_server "$2"
+    ;;
+  port|p)
+    cmd_port "$2"
+    ;;
+  help|--help|-h)
+    cmd_help
+    ;;
+  *)
+    echo "Unknown command: $1"
+    echo ""
+    cmd_help
+    exit 1
+    ;;
+esac

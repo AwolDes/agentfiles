@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "additionalDirectories": [
+      "../worktrees"
+    ],
+    "allow": [
+      "Read(/Users/austin/projects/worktrees/**)",
+      "Edit(/Users/austin/projects/worktrees/**)",
+      "Write(/Users/austin/projects/worktrees/**)",
+      "Bash(cat:*)",
+      "Bash(tree:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(pwd:*)",
+      "Bash(cd:*)",
+      "Bash(git:*)",
+      "Bash(gh:*)",
+      "Bash(rails:*)",
+      "Bash(rake:*)",
+      "Bash(bundle:*)",
+      "Bash(ruby:*)",
+      "Bash(grep:*)",
+      "Bash(bin/worktree:*)",
+      "WebSearch",
+      "WebFetch",
+      "Glob",
+      "Grep",
+      "Task",
+      "TodoWrite"
+    ]
+  }
+}
